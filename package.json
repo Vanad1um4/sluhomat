@@ -1,0 +1,11 @@
+{
+  "name": "sluhomat",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "openai": "^4.56.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "telegraf": "^4.16.3"
+  }
+}
