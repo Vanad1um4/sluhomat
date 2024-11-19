@@ -2,6 +2,10 @@
   "name": "sluhomat",
   "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "start": "node --no-deprecation bot.js",
+    "dev": "node bot.js"
+  },
   "dependencies": {
     "openai": "^4.56.0",
     "sqlite": "^5.1.1",
