@@ -32,6 +32,39 @@ function getAudioDuration(filePath) {
   });
 }
 
+function formatTime(seconds) {
+  if (seconds < 60) {
+    return `${Math.round(seconds)} сек`;
+  } else if (seconds < 3600) {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = Math.round(seconds % 60);
+    return `${minutes} мин ${remainingSeconds} сек`;
+  } else {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return `${hours} ч ${minutes} мин`;
+  }
+}
+
+function getOriginalFilename(file) {
+  // Trying to get filename from different message types:
+  if (file.file_name) {
+    // For documents and audio files:
+    return file.file_name.replace(/\.[^/.]+$/, ''); // Removing extension
+  } else if (file.title) {
+    // For audio messages with title:
+    return file.title;
+  } else {
+    // For voice messages or when no name is available:
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[-:]/g, '') // Removing hyphens and colons
+      .replace(/\..+/, '') // Removing milliseconds
+      .replace('T', '_'); // Replacing 'T' with underscore
+    return `voice_${timestamp}`;
+  }
+}
+
 async function splitAudioIntoChunks(inputPath, outputDir, chunkLengthMinutes) {
   const duration = await getAudioDuration(inputPath);
   const chunkLengthSeconds = chunkLengthMinutes * 60;
@@ -101,14 +134,25 @@ export async function handleAudioMessage(ctx) {
     chunkPaths = await splitAudioIntoChunks(wavPath, tempDir, CHUNK_LENGTH_MINUTES);
 
     let fullTranscription = '';
+    const chunkProcessingTimes = [];
 
     for (let i = 0; i < chunkPaths.length; i++) {
+      const chunkStartTime = Date.now();
+
+      let etaText = '';
+      if (chunkProcessingTimes.length > 0) {
+        const avgProcessingTime = chunkProcessingTimes.reduce((a, b) => a + b, 0) / chunkProcessingTimes.length;
+        const remainingChunks = chunkPaths.length - (i + 1);
+        const estimatedRemainingTime = (avgProcessingTime * remainingChunks) / 1000;
+        etaText = `\nОсталось приблизительно: ${formatTime(estimatedRemainingTime)}`;
+      }
+
       const progressPercent = Math.round(((i + 1) / chunkPaths.length) * 100);
       await ctx.telegram.editMessageText(
         statusMsg.chat.id,
         statusMsg.message_id,
         null,
-        `⌛ Обрабатываю часть ${i + 1} из ${chunkPaths.length} (${progressPercent}%), ждите...`
+        `⌛ Обрабатываю часть ${i + 1} из ${chunkPaths.length} (${progressPercent}%)...${etaText}`
       );
 
       const transcription = await openai.audio.transcriptions.create({
@@ -116,15 +160,22 @@ export async function handleAudioMessage(ctx) {
         model: 'whisper-1',
       });
 
+      const chunkProcessingTime = Date.now() - chunkStartTime;
+      chunkProcessingTimes.push(chunkProcessingTime);
+
       fullTranscription += (i > 0 ? '\n' : '') + transcription.text;
     }
 
-    await ctx.telegram.editMessageText(
-      statusMsg.chat.id,
-      statusMsg.message_id,
-      null,
-      '✅ Расшифровка:\n\n' + fullTranscription
-    );
+    const baseFilename = getOriginalFilename(file);
+    const transcriptionFilePath = path.join(tempDir, `${baseFilename}.txt`);
+    await fsPromises.writeFile(transcriptionFilePath, fullTranscription, 'utf8');
+
+    await ctx.replyWithDocument({
+      source: transcriptionFilePath,
+      filename: `${baseFilename}.txt`,
+    });
+
+    await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '✅ Расшифровка завершена:');
   } catch (error) {
     console.error('Error in handleAudioMessage:', error);
 
