@@ -4,7 +4,6 @@ import { TG_BOT_KEY } from './env.js';
 import { dbInit } from './db/init.js';
 import { handleStart } from './bot/commands.js';
 import { handleAudioMessage } from './bot/audio_handler.js';
-import { dbGetUser } from './db/users.js';
 
 await dbInit();
 
