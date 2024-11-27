@@ -8,6 +8,7 @@ import ffmpegStatic from 'ffmpeg-static';
 
 import { OPENAI_API_KEY, TG_BOT_KEY, CHUNK_LENGTH_MINUTES, MAX_PROMPT_LENGTH, TEMP_FILES_DIR } from '../env.js';
 import { dbGetUser } from '../db/users.js';
+import logger from '../logger.js';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
@@ -99,17 +100,21 @@ async function cleanDirectory(directory) {
     await fsPromises.rm(directory, { recursive: true, force: true });
     await fsPromises.mkdir(directory, { recursive: true });
   } catch (error) {
-    console.error('Error cleaning directory:', error);
+    await logger.error('Error cleaning directory:', error);
     throw error;
   }
 }
 
 export async function handleAudioMessage(ctx) {
   let tempDir = null;
+  let statusMsg = null;
 
   try {
     const user = await dbGetUser(ctx.message.from.id);
-    if (!user) return;
+    if (!user) {
+      await logger.warn(`Unauthorized access attempt from user ${ctx.message.from.id}`);
+      return;
+    }
 
     await ctx.sendChatAction('typing');
 
@@ -137,7 +142,8 @@ export async function handleAudioMessage(ctx) {
     const fileStream = fs.createWriteStream(downloadPath);
     await pipeline(response.body, fileStream);
 
-    const statusMsg = await ctx.reply('⌛ Конвертирую аудио...');
+    statusMsg = await ctx.reply('⌛ Конвертирую аудио...');
+    await logger.info(`Starting audio conversion for file ${fileId}`);
 
     await convertToWav(downloadPath, wavPath);
 
@@ -195,22 +201,39 @@ export async function handleAudioMessage(ctx) {
     });
 
     await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '✅ Расшифровка завершена');
+    await logger.info(`Successfully processed audio file ${fileId}`);
   } catch (error) {
-    console.error('Error in handleAudioMessage:', error);
+    await logger.error('Error in handleAudioMessage:', error);
+    const errorContext = {
+      userId: ctx.message.from.id,
+      messageId: ctx.message.message_id,
+      chatId: ctx.chat.id,
+      fileInfo: file ? JSON.stringify(file) : 'No file',
+    };
+    await logger.error(`Additional context: ${JSON.stringify(errorContext)}`);
+
     if (statusMsg) {
       await ctx.telegram
         .editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '❌ Произошла ошибка при обработке аудио.')
-        .catch(console.error);
+        .catch(async (err) => await logger.error('Error sending error message:', err));
     } else {
-      await ctx.reply('❌ Произошла ошибка при обработке аудио.').catch(console.error);
+      await ctx
+        .reply('❌ Произошла ошибка при обработке аудио.')
+        .catch(async (err) => await logger.error('Error sending error message:', err));
     }
   } finally {
     if (tempDir) {
-      const files = await fsPromises.readdir(tempDir);
-      for (const file of files) {
-        if (!file.endsWith('.txt')) {
-          await fsPromises.unlink(path.join(tempDir, file)).catch(console.error);
+      try {
+        const files = await fsPromises.readdir(tempDir);
+        for (const file of files) {
+          if (!file.endsWith('.txt')) {
+            await fsPromises
+              .unlink(path.join(tempDir, file))
+              .catch(async (err) => await logger.error(`Error cleaning up file ${file}:`, err));
+          }
         }
+      } catch (error) {
+        await logger.error('Error in cleanup:', error);
       }
     }
   }

@@ -5,3 +5,4 @@ sluhomat.db
 package-lock.json
 strangers.log
 temp/
+bot_errors.log

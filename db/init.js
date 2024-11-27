@@ -1,5 +1,6 @@
 import { getConnection } from './db.js';
 import { INIT_USERS } from '../env.js';
+import logger from '../logger.js';
 
 export async function dbInit() {
   const connection = await getConnection();
@@ -23,6 +24,7 @@ export async function dbInit() {
   try {
     for (const table of tables) {
       await connection.exec(table.query);
+      await logger.info(`Created/verified table: ${table.name}`);
     }
 
     const insertQuery = `
@@ -38,11 +40,13 @@ export async function dbInit() {
         user.tgLastname ?? null,
         user.isAdmin ? 1 : 0,
       ]);
+      await logger.info(`Initialized user: ${user.tgUsername || user.tgId}`);
     }
 
-    console.log('Database initialized successfully');
+    await logger.info('Database initialized successfully');
   } catch (error) {
-    console.error('Database initialization error:', error);
+    await logger.error('Database initialization error:', error);
+    throw error;
   } finally {
     await connection.close();
   }

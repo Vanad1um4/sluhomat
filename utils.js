@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
-
 import { STRANGER_LOGS_FILENAME } from './env.js';
+import logger from './logger.js';
 
 export function escapeHTML(text) {
   return text
@@ -23,7 +23,8 @@ export async function logMessageToFile(message) {
 
   try {
     await fs.appendFile(`${STRANGER_LOGS_FILENAME}`, logString + '\n\n');
+    await logger.info(`Logged stranger message from user ${message.from.id}`);
   } catch (error) {
-    console.error('Error logging message to file:', error);
+    await logger.error('Error logging stranger message to file:', error);
   }
 }
