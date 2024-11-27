@@ -155,7 +155,7 @@ export async function handleAudioMessage(ctx) {
       let etaText = '';
       if (chunkProcessingTimes.length > 0) {
         const avgProcessingTime = chunkProcessingTimes.reduce((a, b) => a + b, 0) / chunkProcessingTimes.length;
-        const remainingChunks = chunks.length - (i + 1);
+        const remainingChunks = chunks.length - i;
         const estimatedRemainingTime = (avgProcessingTime * remainingChunks) / 1000;
         etaText = `\nОсталось приблизительно: ${formatTime(estimatedRemainingTime)}`;
       }
