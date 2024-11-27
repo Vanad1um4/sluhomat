@@ -6,7 +6,7 @@ import { pipeline } from 'stream/promises';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 
-import { OPENAI_API_KEY, TG_BOT_KEY, CHUNK_LENGTH_MINUTES } from '../env.js';
+import { OPENAI_API_KEY, TG_BOT_KEY, CHUNK_LENGTH_MINUTES, MAX_PROMPT_LENGTH, TEMP_FILES_DIR } from '../env.js';
 import { dbGetUser } from '../db/users.js';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
@@ -72,28 +72,40 @@ async function splitAudioIntoChunks(inputPath, outputDir, chunkLengthMinutes) {
 
   for (let start = 0; start < duration; start += chunkLengthSeconds) {
     const outputPath = path.join(outputDir, `chunk-${start}.wav`);
+    const currentChunkLength = Math.min(chunkLengthSeconds, duration - start);
 
     await new Promise((resolve, reject) => {
       ffmpeg(inputPath)
         .setStartTime(start)
-        .setDuration(chunkLengthSeconds)
+        .setDuration(currentChunkLength)
         .toFormat('wav')
         .on('end', () => resolve())
         .on('error', (err) => reject(err))
         .save(outputPath);
     });
 
-    chunks.push(outputPath);
+    chunks.push({
+      path: outputPath,
+      startTime: start,
+      duration: currentChunkLength,
+    });
   }
 
   return chunks;
 }
 
+async function cleanDirectory(directory) {
+  try {
+    await fsPromises.rm(directory, { recursive: true, force: true });
+    await fsPromises.mkdir(directory, { recursive: true });
+  } catch (error) {
+    console.error('Error cleaning directory:', error);
+    throw error;
+  }
+}
+
 export async function handleAudioMessage(ctx) {
-  let downloadPath = null;
-  let wavPath = null;
-  let chunkPaths = [];
-  let statusMsg = null;
+  let tempDir = null;
 
   try {
     const user = await dbGetUser(ctx.message.from.id);
@@ -106,15 +118,15 @@ export async function handleAudioMessage(ctx) {
       throw new Error('No audio file found in message');
     }
 
-    const tempDir = path.join('temp', file.file_id);
-    await fsPromises.mkdir(tempDir, { recursive: true });
+    tempDir = path.join(TEMP_FILES_DIR, file.file_id);
+    await cleanDirectory(tempDir);
 
     const fileId = file.file_id;
     const fileLink = await ctx.telegram.getFile(fileId);
     const filePath = fileLink.file_path;
 
-    downloadPath = path.join(tempDir, `original${path.extname(filePath)}`);
-    wavPath = path.join(tempDir, 'converted.wav');
+    const downloadPath = path.join(tempDir, `original${path.extname(filePath)}`);
+    const wavPath = path.join(tempDir, 'converted.wav');
 
     const fileUrl = `https://api.telegram.org/file/bot${TG_BOT_KEY}/${filePath}`;
     const response = await fetch(fileUrl);
@@ -125,45 +137,52 @@ export async function handleAudioMessage(ctx) {
     const fileStream = fs.createWriteStream(downloadPath);
     await pipeline(response.body, fileStream);
 
-    statusMsg = await ctx.reply('⌛ Конвертирую аудио...');
+    const statusMsg = await ctx.reply('⌛ Конвертирую аудио...');
 
     await convertToWav(downloadPath, wavPath);
 
     await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '⌛ Разбиваю на части...');
 
-    chunkPaths = await splitAudioIntoChunks(wavPath, tempDir, CHUNK_LENGTH_MINUTES);
+    const chunks = await splitAudioIntoChunks(wavPath, tempDir, CHUNK_LENGTH_MINUTES);
 
     let fullTranscription = '';
     const chunkProcessingTimes = [];
+    let previousChunkText = '';
 
-    for (let i = 0; i < chunkPaths.length; i++) {
+    for (let i = 0; i < chunks.length; i++) {
       const chunkStartTime = Date.now();
 
       let etaText = '';
       if (chunkProcessingTimes.length > 0) {
         const avgProcessingTime = chunkProcessingTimes.reduce((a, b) => a + b, 0) / chunkProcessingTimes.length;
-        const remainingChunks = chunkPaths.length - (i + 1);
+        const remainingChunks = chunks.length - (i + 1);
         const estimatedRemainingTime = (avgProcessingTime * remainingChunks) / 1000;
         etaText = `\nОсталось приблизительно: ${formatTime(estimatedRemainingTime)}`;
       }
 
-      const progressPercent = Math.round(((i + 1) / chunkPaths.length) * 100);
+      const progressPercent = Math.round(((i + 1) / chunks.length) * 100);
       await ctx.telegram.editMessageText(
         statusMsg.chat.id,
         statusMsg.message_id,
         null,
-        `⌛ Обрабатываю часть ${i + 1} из ${chunkPaths.length} (${progressPercent}%)...${etaText}`
+        `⌛ Обрабатываю часть ${i + 1} из ${chunks.length} (${progressPercent}%)...${etaText}`
       );
 
+      const prompt = previousChunkText.slice(-MAX_PROMPT_LENGTH);
+
       const transcription = await openai.audio.transcriptions.create({
-        file: fs.createReadStream(chunkPaths[i]),
+        file: fs.createReadStream(chunks[i].path),
         model: 'whisper-1',
+        prompt: prompt,
+        temperature: 0,
+        language: 'ru',
       });
 
       const chunkProcessingTime = Date.now() - chunkStartTime;
       chunkProcessingTimes.push(chunkProcessingTime);
 
-      fullTranscription += (i > 0 ? '\n' : '') + transcription.text;
+      fullTranscription += (i > 0 ? '\n' : '') + transcription.text.trim();
+      previousChunkText = transcription.text.trim();
     }
 
     const baseFilename = getOriginalFilename(file);
@@ -175,21 +194,24 @@ export async function handleAudioMessage(ctx) {
       filename: `${baseFilename}.txt`,
     });
 
-    await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '✅ Расшифровка завершена:');
+    await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '✅ Расшифровка завершена');
   } catch (error) {
     console.error('Error in handleAudioMessage:', error);
-
-    const errorMessage = statusMsg
-      ? ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '❌ Произошла ошибка при обработке аудио.')
-      : ctx.reply('❌ Произошла ошибка при обработке аудио.');
-
-    await errorMessage.catch(console.error);
+    if (statusMsg) {
+      await ctx.telegram
+        .editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '❌ Произошла ошибка при обработке аудио.')
+        .catch(console.error);
+    } else {
+      await ctx.reply('❌ Произошла ошибка при обработке аудио.').catch(console.error);
+    }
   } finally {
-    if (downloadPath) {
-      const tempDir = path.dirname(downloadPath);
-      await fsPromises
-        .rm(tempDir, { recursive: true, force: true })
-        .catch((err) => console.error('Error deleting temporary directory:', err));
+    if (tempDir) {
+      const files = await fsPromises.readdir(tempDir);
+      for (const file of files) {
+        if (!file.endsWith('.txt')) {
+          await fsPromises.unlink(path.join(tempDir, file)).catch(console.error);
+        }
+      }
     }
   }
 }

@@ -4,3 +4,4 @@ sluhomat.db
 *.project_src
 package-lock.json
 strangers.log
+temp/

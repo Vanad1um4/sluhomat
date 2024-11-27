@@ -1,5 +1,5 @@
 import fs from 'fs/promises';
-import { STRANGER_LOGS_FILENAME } from './const.js';
+import { STRANGER_LOGS_FILENAME } from './env.js';
 
 export function escapeHTML(text) {
   return text
