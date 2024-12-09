@@ -1,18 +1,36 @@
+import ffmpegStatic from 'ffmpeg-static';
+import ffmpeg from 'fluent-ffmpeg';
+import fs, { promises as fsPromises } from 'fs';
 import OpenAI from 'openai';
-import fs from 'fs';
-import { promises as fsPromises } from 'fs';
 import path from 'path';
 import { pipeline } from 'stream/promises';
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegStatic from 'ffmpeg-static';
 
-import { OPENAI_API_KEY, TG_BOT_KEY, CHUNK_LENGTH_MINUTES, MAX_PROMPT_LENGTH, TEMP_FILES_DIR } from '../env.js';
 import { dbGetUser } from '../db/users.js';
+import { CHUNK_LENGTH_MINUTES, MAX_PROMPT_LENGTH, OPENAI_API_KEY, TEMP_FILES_DIR, TG_BOT_KEY } from '../env.js';
 import logger from '../logger.js';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+async function cleanupOldTempFiles() {
+  try {
+    const tempDir = TEMP_FILES_DIR;
+    const files = await fsPromises.readdir(tempDir);
+    const now = Date.now();
+
+    for (const file of files) {
+      const filePath = path.join(tempDir, file);
+      const stats = await fsPromises.stat(filePath);
+
+      if (now - stats.mtimeMs > 3600000) {
+        await fsPromises.rm(filePath, { recursive: true, force: true });
+      }
+    }
+  } catch (error) {
+    await logger.error('Error cleaning old temp files:', error);
+  }
+}
 
 function convertToWav(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
@@ -106,6 +124,8 @@ async function cleanDirectory(directory) {
 }
 
 export async function handleAudioMessage(ctx) {
+  await cleanupOldTempFiles();
+
   let tempDir = null;
   let statusMsg = null;
 

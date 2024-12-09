@@ -1,6 +1,6 @@
-import { getConnection } from './db.js';
 import { INIT_USERS } from '../env.js';
 import logger from '../logger.js';
+import { getConnection } from './db.js';
 
 export async function dbInit() {
   const connection = await getConnection();

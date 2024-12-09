@@ -1,5 +1,5 @@
-import { getConnection } from './db.js';
 import logger from '../logger.js';
+import { getConnection } from './db.js';
 
 export async function dbGetUser(tgId) {
   const connection = await getConnection();
