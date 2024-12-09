@@ -22,19 +22,13 @@ const EMOJI = {
 };
 
 const RU_MESSAGES = {
-  STEPS: {
-    CONVERTING: 'Конвертация аудио',
-    SPLITTING: 'Разделение аудио на части',
-    TRANSCRIBING: 'Распознавание текста',
-  },
-  TIME: {
-    REMAINING: 'Осталось приблизительно:',
-    COMPLETED: 'Расшифровка завершена за',
-    RESULTS: 'Результаты',
-  },
-  ERRORS: {
-    PROCESSING_ERROR: 'Произошла ошибка при обработке аудио.',
-  },
+  CONVERTING: 'Конвертация аудио',
+  SPLITTING: 'Разделение аудио на части',
+  TRANSCRIBING: 'Распознавание текста',
+  REMAINING: 'Осталось приблизительно:',
+  COMPLETED: 'Расшифровка завершена за',
+  RESULTS: 'Результаты',
+  ERROR: 'Произошла ошибка при обработке аудио.',
 };
 
 async function cleanupOldTempFiles() {
@@ -147,6 +141,105 @@ async function cleanDirectory(directory) {
   }
 }
 
+async function downloadAudioFile(ctx, file, downloadPath) {
+  const fileLink = await ctx.telegram.getFile(file.file_id);
+  const fileUrl = `https://api.telegram.org/file/bot${TG_BOT_KEY}/${fileLink.file_path}`;
+
+  const response = await fetch(fileUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to download file: ${response.statusText}`);
+  }
+
+  const fileStream = fs.createWriteStream(downloadPath);
+  await pipeline(response.body, fileStream);
+
+  return fileLink;
+}
+
+async function processAudioChunk(chunk, previousChunkText) {
+  const prompt = previousChunkText.slice(-MAX_PROMPT_LENGTH);
+
+  const transcription = await openai.audio.transcriptions.create({
+    file: fs.createReadStream(chunk.path),
+    model: 'whisper-1',
+    prompt: prompt,
+    temperature: 0,
+    language: 'ru',
+  });
+
+  return transcription.text.trim();
+}
+
+async function updateTranscriptionProgress(steps, updateStatus, currentChunk, totalChunks, chunkProcessingTimes) {
+  let etaText = '';
+  if (chunkProcessingTimes.length > 0) {
+    const avgProcessingTime = chunkProcessingTimes.reduce((a, b) => a + b, 0) / chunkProcessingTimes.length;
+    const remainingChunks = totalChunks - currentChunk;
+    const estimatedRemainingTime = (avgProcessingTime * remainingChunks) / 1000;
+    etaText = `\n${RU_MESSAGES.REMAINING} ${formatTime(estimatedRemainingTime)}`;
+  }
+
+  const progressPercent = Math.round(((currentChunk + 1) / totalChunks) * 100);
+  steps[2].text = `Распознавание текста (${progressPercent}%)`;
+  if (progressPercent < 100) {
+    steps[2].text += etaText;
+  }
+  await updateStatus(steps);
+}
+
+async function transcribeAudioChunks(chunks, steps, updateStatus) {
+  let fullTranscription = '';
+  const chunkProcessingTimes = [];
+  let previousChunkText = '';
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkStartTime = Date.now();
+
+    await updateTranscriptionProgress(steps, updateStatus, i, chunks.length, chunkProcessingTimes);
+
+    const chunkText = await processAudioChunk(chunks[i], previousChunkText);
+
+    const chunkProcessingTime = Date.now() - chunkStartTime;
+    chunkProcessingTimes.push(chunkProcessingTime);
+
+    fullTranscription += (i > 0 ? '\n' : '') + chunkText;
+    previousChunkText = chunkText;
+  }
+
+  return fullTranscription;
+}
+
+async function saveAndSendTranscription(ctx, tempDir, file, fullTranscription) {
+  const baseFilename = getOriginalFilename(file);
+  const transcriptionFilePath = path.join(tempDir, `${baseFilename}.txt`);
+  await fsPromises.writeFile(transcriptionFilePath, fullTranscription, 'utf8');
+
+  await ctx.replyWithDocument({
+    source: transcriptionFilePath,
+    filename: `${baseFilename}.txt`,
+  });
+}
+
+async function handleErrorAndCleanup(error, ctx, statusMsg, file) {
+  await logger.error('Error in handleAudioMessage:', error);
+  const errorContext = {
+    userId: ctx.message.from.id,
+    messageId: ctx.message.message_id,
+    chatId: ctx.chat.id,
+    fileInfo: file ? JSON.stringify(file) : 'No file',
+  };
+  await logger.error(`Additional context: ${JSON.stringify(errorContext)}`);
+
+  const errorMessage = `${EMOJI.ERROR} ${RU_MESSAGES.ERROR}`;
+  if (statusMsg) {
+    await ctx.telegram
+      .editMessageText(statusMsg.chat.id, statusMsg.message_id, null, errorMessage)
+      .catch(async (err) => await logger.error('Error sending error message:', err));
+  } else {
+    await ctx.reply(errorMessage).catch(async (err) => await logger.error('Error sending error message:', err));
+  }
+}
+
 export async function handleAudioMessage(ctx) {
   await cleanupOldTempFiles();
 
@@ -178,119 +271,46 @@ export async function handleAudioMessage(ctx) {
     };
 
     const steps = [];
-
-    steps.push({ text: RU_MESSAGES.STEPS.CONVERTING, status: EMOJI.PENDING });
+    steps.push({ text: RU_MESSAGES.CONVERTING, status: EMOJI.PENDING });
     await updateStatus(steps);
 
     tempDir = path.join(TEMP_FILES_DIR, file.file_id);
     await cleanDirectory(tempDir);
 
-    const fileId = file.file_id;
-    const fileLink = await ctx.telegram.getFile(fileId);
-    const filePath = fileLink.file_path;
-
-    const downloadPath = path.join(tempDir, `original${path.extname(filePath)}`);
+    const fileLink = await ctx.telegram.getFile(file.file_id);
+    const downloadPath = path.join(tempDir, `original${path.extname(fileLink.file_path)}`);
     const wavPath = path.join(tempDir, 'converted.wav');
 
-    const fileUrl = `https://api.telegram.org/file/bot${TG_BOT_KEY}/${filePath}`;
-    const response = await fetch(fileUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to download file: ${response.statusText}`);
-    }
-
-    const fileStream = fs.createWriteStream(downloadPath);
-    await pipeline(response.body, fileStream);
-
+    await downloadAudioFile(ctx, file, downloadPath);
     await convertToWav(downloadPath, wavPath);
 
     steps[0].status = EMOJI.DONE;
-    steps.push({ text: RU_MESSAGES.STEPS.SPLITTING, status: EMOJI.PENDING });
+    steps.push({ text: RU_MESSAGES.SPLITTING, status: EMOJI.PENDING });
     await updateStatus(steps);
 
     const chunks = await splitAudioIntoChunks(wavPath, tempDir, CHUNK_LENGTH_MINUTES);
 
     steps[1].status = EMOJI.DONE;
-    steps.push({ text: RU_MESSAGES.STEPS.TRANSCRIBING, status: EMOJI.PENDING });
+    steps.push({ text: RU_MESSAGES.TRANSCRIBING, status: EMOJI.PENDING });
     await updateStatus(steps);
 
-    let fullTranscription = '';
-    const chunkProcessingTimes = [];
-    let previousChunkText = '';
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkStartTime = Date.now();
-
-      let etaText = '';
-      if (chunkProcessingTimes.length > 0) {
-        const avgProcessingTime = chunkProcessingTimes.reduce((a, b) => a + b, 0) / chunkProcessingTimes.length;
-        const remainingChunks = chunks.length - i;
-        const estimatedRemainingTime = (avgProcessingTime * remainingChunks) / 1000;
-        etaText = `\n${RU_MESSAGES.TIME.REMAINING} ${formatTime(estimatedRemainingTime)}`;
-      }
-
-      const progressPercent = Math.round(((i + 1) / chunks.length) * 100);
-      steps[2].text = `Распознавание текста (${progressPercent}%)`;
-      if (progressPercent < 100) {
-        steps[2].text += etaText;
-      }
-      await updateStatus(steps);
-
-      const prompt = previousChunkText.slice(-MAX_PROMPT_LENGTH);
-
-      const transcription = await openai.audio.transcriptions.create({
-        file: fs.createReadStream(chunks[i].path),
-        model: 'whisper-1',
-        prompt: prompt,
-        temperature: 0,
-        language: 'ru',
-      });
-
-      const chunkProcessingTime = Date.now() - chunkStartTime;
-      chunkProcessingTimes.push(chunkProcessingTime);
-
-      fullTranscription += (i > 0 ? '\n' : '') + transcription.text.trim();
-      previousChunkText = transcription.text.trim();
-    }
+    const fullTranscription = await transcribeAudioChunks(chunks, steps, updateStatus);
 
     steps[2].status = EMOJI.DONE;
     await updateStatus(steps);
 
-    const baseFilename = getOriginalFilename(file);
-    const transcriptionFilePath = path.join(tempDir, `${baseFilename}.txt`);
-    await fsPromises.writeFile(transcriptionFilePath, fullTranscription, 'utf8');
-
-    await ctx.replyWithDocument({
-      source: transcriptionFilePath,
-      filename: `${baseFilename}.txt`,
-    });
+    await saveAndSendTranscription(ctx, tempDir, file, fullTranscription);
 
     const totalTime = formatTime((Date.now() - startTime) / 1000);
     steps.push({
-      text: `${RU_MESSAGES.TIME.COMPLETED} ${totalTime}. ${RU_MESSAGES.TIME.RESULTS}: ${EMOJI.ARROW_DOWN}`,
+      text: `${RU_MESSAGES.COMPLETED} ${totalTime}. ${RU_MESSAGES.RESULTS}: ${EMOJI.ARROW_DOWN}`,
       status: EMOJI.PARTY,
     });
     await updateStatus(steps);
 
-    await logger.info(`Successfully processed audio file ${fileId}`);
+    await logger.info(`Successfully processed audio file ${file.file_id}`);
   } catch (error) {
-    await logger.error('Error in handleAudioMessage:', error);
-    const errorContext = {
-      userId: ctx.message.from.id,
-      messageId: ctx.message.message_id,
-      chatId: ctx.chat.id,
-      fileInfo: file ? JSON.stringify(file) : 'No file',
-    };
-    await logger.error(`Additional context: ${JSON.stringify(errorContext)}`);
-
-    if (statusMsg) {
-      await ctx.telegram
-        .editMessageText(statusMsg.chat.id, statusMsg.message_id, null, `${EMOJI.ERROR} ${RU_MESSAGES.ERRORS.PROCESSING_ERROR}`)
-        .catch(async (err) => await logger.error('Error sending error message:', err));
-    } else {
-      await ctx
-        .reply(`${EMOJI.ERROR} ${RU_MESSAGES.ERRORS.PROCESSING_ERROR}`)
-        .catch(async (err) => await logger.error('Error sending error message:', err));
-    }
+    await handleErrorAndCleanup(error, ctx, statusMsg, file);
   } finally {
     if (tempDir) {
       try {
