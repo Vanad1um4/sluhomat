@@ -1,7 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
 
-import { cleanupOldTempFiles, handleAudioMessage } from './bot/audio_handler.js';
+import { handleAudioMessage } from './bot/audio_handler.js';
 import { handleStart } from './bot/commands.js';
 import { dbInit } from './db/init.js';
 import { TG_BOT_KEY } from './env.js';
@@ -17,7 +17,6 @@ process.on('unhandledRejection', async (error) => {
 });
 
 await dbInit();
-await cleanupOldTempFiles();
 
 const bot = new Telegraf(TG_BOT_KEY);
 

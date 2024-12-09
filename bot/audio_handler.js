@@ -13,6 +13,30 @@ ffmpeg.setFfmpegPath(ffmpegStatic);
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
+const EMOJI = {
+  DONE: '✅',
+  PENDING: '⌛',
+  ERROR: '❌',
+  PARTY: '🎉',
+  ARROW_DOWN: '⬇️',
+};
+
+const RU_MESSAGES = {
+  STEPS: {
+    CONVERTING: 'Конвертация аудио',
+    SPLITTING: 'Разделение аудио на части',
+    TRANSCRIBING: 'Распознавание текста',
+  },
+  TIME: {
+    REMAINING: 'Осталось приблизительно:',
+    COMPLETED: 'Расшифровка завершена за',
+    RESULTS: 'Результаты',
+  },
+  ERRORS: {
+    PROCESSING_ERROR: 'Произошла ошибка при обработке аудио.',
+  },
+};
+
 async function cleanupOldTempFiles() {
   try {
     const tempDir = TEMP_FILES_DIR;
@@ -128,6 +152,7 @@ export async function handleAudioMessage(ctx) {
 
   let tempDir = null;
   let statusMsg = null;
+  const startTime = Date.now();
 
   try {
     const user = await dbGetUser(ctx.message.from.id);
@@ -142,6 +167,20 @@ export async function handleAudioMessage(ctx) {
     if (!file) {
       throw new Error('No audio file found in message');
     }
+
+    const updateStatus = async (steps) => {
+      const message = steps.map(({ text, status }) => `${status} ${text}`).join('\n');
+      if (statusMsg) {
+        await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, message);
+      } else {
+        statusMsg = await ctx.reply(message);
+      }
+    };
+
+    const steps = [];
+
+    steps.push({ text: RU_MESSAGES.STEPS.CONVERTING, status: EMOJI.PENDING });
+    await updateStatus(steps);
 
     tempDir = path.join(TEMP_FILES_DIR, file.file_id);
     await cleanDirectory(tempDir);
@@ -162,14 +201,17 @@ export async function handleAudioMessage(ctx) {
     const fileStream = fs.createWriteStream(downloadPath);
     await pipeline(response.body, fileStream);
 
-    statusMsg = await ctx.reply('⌛ Конвертирую аудио...');
-    await logger.info(`Starting audio conversion for file ${fileId}`);
-
     await convertToWav(downloadPath, wavPath);
 
-    await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '⌛ Разбиваю на части...');
+    steps[0].status = EMOJI.DONE;
+    steps.push({ text: RU_MESSAGES.STEPS.SPLITTING, status: EMOJI.PENDING });
+    await updateStatus(steps);
 
     const chunks = await splitAudioIntoChunks(wavPath, tempDir, CHUNK_LENGTH_MINUTES);
+
+    steps[1].status = EMOJI.DONE;
+    steps.push({ text: RU_MESSAGES.STEPS.TRANSCRIBING, status: EMOJI.PENDING });
+    await updateStatus(steps);
 
     let fullTranscription = '';
     const chunkProcessingTimes = [];
@@ -183,16 +225,15 @@ export async function handleAudioMessage(ctx) {
         const avgProcessingTime = chunkProcessingTimes.reduce((a, b) => a + b, 0) / chunkProcessingTimes.length;
         const remainingChunks = chunks.length - i;
         const estimatedRemainingTime = (avgProcessingTime * remainingChunks) / 1000;
-        etaText = `\nОсталось приблизительно: ${formatTime(estimatedRemainingTime)}`;
+        etaText = `\n${RU_MESSAGES.TIME.REMAINING} ${formatTime(estimatedRemainingTime)}`;
       }
 
       const progressPercent = Math.round(((i + 1) / chunks.length) * 100);
-      await ctx.telegram.editMessageText(
-        statusMsg.chat.id,
-        statusMsg.message_id,
-        null,
-        `⌛ Обрабатываю часть ${i + 1} из ${chunks.length} (${progressPercent}%)...${etaText}`
-      );
+      steps[2].text = `Распознавание текста (${progressPercent}%)`;
+      if (progressPercent < 100) {
+        steps[2].text += etaText;
+      }
+      await updateStatus(steps);
 
       const prompt = previousChunkText.slice(-MAX_PROMPT_LENGTH);
 
@@ -211,6 +252,9 @@ export async function handleAudioMessage(ctx) {
       previousChunkText = transcription.text.trim();
     }
 
+    steps[2].status = EMOJI.DONE;
+    await updateStatus(steps);
+
     const baseFilename = getOriginalFilename(file);
     const transcriptionFilePath = path.join(tempDir, `${baseFilename}.txt`);
     await fsPromises.writeFile(transcriptionFilePath, fullTranscription, 'utf8');
@@ -220,7 +264,13 @@ export async function handleAudioMessage(ctx) {
       filename: `${baseFilename}.txt`,
     });
 
-    await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '✅ Расшифровка завершена');
+    const totalTime = formatTime((Date.now() - startTime) / 1000);
+    steps.push({
+      text: `${RU_MESSAGES.TIME.COMPLETED} ${totalTime}. ${RU_MESSAGES.TIME.RESULTS}: ${EMOJI.ARROW_DOWN}`,
+      status: EMOJI.PARTY,
+    });
+    await updateStatus(steps);
+
     await logger.info(`Successfully processed audio file ${fileId}`);
   } catch (error) {
     await logger.error('Error in handleAudioMessage:', error);
@@ -234,11 +284,11 @@ export async function handleAudioMessage(ctx) {
 
     if (statusMsg) {
       await ctx.telegram
-        .editMessageText(statusMsg.chat.id, statusMsg.message_id, null, '❌ Произошла ошибка при обработке аудио.')
+        .editMessageText(statusMsg.chat.id, statusMsg.message_id, null, `${EMOJI.ERROR} ${RU_MESSAGES.ERRORS.PROCESSING_ERROR}`)
         .catch(async (err) => await logger.error('Error sending error message:', err));
     } else {
       await ctx
-        .reply('❌ Произошла ошибка при обработке аудио.')
+        .reply(`${EMOJI.ERROR} ${RU_MESSAGES.ERRORS.PROCESSING_ERROR}`)
         .catch(async (err) => await logger.error('Error sending error message:', err));
     }
   } finally {
