@@ -32,7 +32,6 @@ bot.on(message('voice'), handleAudioMessage);
 bot.on(message('audio'), handleAudioMessage);
 bot.on(message('video'), handleAudioMessage);
 bot.on(message('video_note'), handleAudioMessage);
-
 bot.on(message('document'), async (ctx) => {
   const mime = ctx.message.document.mime_type;
   const supportedVideoTypes = [

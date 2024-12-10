@@ -166,7 +166,7 @@ async function processAudioChunk(chunk, previousChunkText) {
   return transcription.text.trim();
 }
 
-async function updateTranscriptionProgress(steps, updateStatus, currentChunk, totalChunks, chunkProcessingTimes) {
+async function updateTranscriptionProgress(steps, ctx, statusMsg, currentChunk, totalChunks, chunkProcessingTimes) {
   let etaText = '';
   if (chunkProcessingTimes.length > 0) {
     const avgProcessingTime = chunkProcessingTimes.reduce((a, b) => a + b, 0) / chunkProcessingTimes.length;
@@ -180,26 +180,24 @@ async function updateTranscriptionProgress(steps, updateStatus, currentChunk, to
   if (progressPercent < 100) {
     steps[2].text += etaText;
   }
-  await updateStatus(steps);
+  statusMsg = await updateStatusMessage(ctx, statusMsg, steps);
 }
 
-async function transcribeAudioChunks(chunks, steps, updateStatus) {
+async function transcribeAudioChunks(chunks, steps, ctx, statusMsg) {
   let fullTranscription = '';
   const chunkProcessingTimes = [];
   let previousChunkText = '';
 
-  for (let i = 0; i < chunks.length; i++) {
+  let i = 0;
+  for (const chunk of chunks) {
     const chunkStartTime = Date.now();
-
-    await updateTranscriptionProgress(steps, updateStatus, i, chunks.length, chunkProcessingTimes);
-
-    const chunkText = await processAudioChunk(chunks[i], previousChunkText);
-
+    await updateTranscriptionProgress(steps, ctx, statusMsg, i, chunks.length, chunkProcessingTimes);
+    const chunkText = await processAudioChunk(chunk, previousChunkText);
     const chunkProcessingTime = Date.now() - chunkStartTime;
     chunkProcessingTimes.push(chunkProcessingTime);
-
     fullTranscription += (i > 0 ? '\n' : '') + chunkText;
     previousChunkText = chunkText;
+    i++;
   }
 
   return fullTranscription;
@@ -236,6 +234,15 @@ async function handleErrorAndCleanup(error, ctx, statusMsg, file) {
   }
 }
 
+async function updateStatusMessage(ctx, statusMsg, steps) {
+  const message = steps.map(({ text, status }) => `${status} ${text}`).join('\n');
+  if (statusMsg) {
+    return await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, message);
+  } else {
+    return await ctx.reply(message);
+  }
+}
+
 export async function handleAudioMessage(ctx) {
   await cleanupTempFiles();
 
@@ -257,18 +264,9 @@ export async function handleAudioMessage(ctx) {
       throw new Error('No audio file found in message');
     }
 
-    const updateStatus = async (steps) => {
-      const message = steps.map(({ text, status }) => `${status} ${text}`).join('\n');
-      if (statusMsg) {
-        await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, null, message);
-      } else {
-        statusMsg = await ctx.reply(message);
-      }
-    };
-
     const steps = [];
     steps.push({ text: RU_MESSAGES.CONVERTING, status: EMOJI.PENDING });
-    await updateStatus(steps);
+    statusMsg = await updateStatusMessage(ctx, statusMsg, steps);
 
     tempDir = path.join(TEMP_FILES_DIR, file.file_id);
     await cleanDirectory(tempDir);
@@ -282,18 +280,18 @@ export async function handleAudioMessage(ctx) {
 
     steps[0].status = EMOJI.DONE;
     steps.push({ text: RU_MESSAGES.SPLITTING, status: EMOJI.PENDING });
-    await updateStatus(steps);
+    statusMsg = await updateStatusMessage(ctx, statusMsg, steps);
 
     const chunks = await splitAudioIntoChunks(wavPath, tempDir, CHUNK_LENGTH_MINUTES);
 
     steps[1].status = EMOJI.DONE;
     steps.push({ text: RU_MESSAGES.TRANSCRIBING, status: EMOJI.PENDING });
-    await updateStatus(steps);
+    statusMsg = await updateStatusMessage(ctx, statusMsg, steps);
 
-    const fullTranscription = await transcribeAudioChunks(chunks, steps, updateStatus);
+    const fullTranscription = await transcribeAudioChunks(chunks, steps, ctx, statusMsg);
 
     steps[2].status = EMOJI.DONE;
-    await updateStatus(steps);
+    statusMsg = await updateStatusMessage(ctx, statusMsg, steps);
 
     await saveAndSendTranscription(ctx, tempDir, file, fullTranscription);
 
@@ -302,7 +300,7 @@ export async function handleAudioMessage(ctx) {
       text: `${RU_MESSAGES.COMPLETED} ${totalTime}. ${RU_MESSAGES.RESULTS}: ${EMOJI.ARROW_DOWN}`,
       status: EMOJI.PARTY,
     });
-    await updateStatus(steps);
+    statusMsg = await updateStatusMessage(ctx, statusMsg, steps);
 
     await logger.info(`Successfully processed audio file ${file.file_id}`);
   } catch (error) {
