@@ -19,6 +19,7 @@ const EMOJI = {
   ERROR: '❌',
   PARTY: '🎉',
   ARROW_DOWN: '⬇️',
+  WARNING: '⚠️',
 };
 
 const RU_MESSAGES = {
@@ -29,6 +30,9 @@ const RU_MESSAGES = {
   COMPLETED: 'Расшифровка завершена за',
   RESULTS: 'Результаты',
   ERROR: 'Произошла ошибка при обработке аудио.',
+  PARTIAL_RESULTS: 'Частичные результаты распознавания',
+  ERROR_WITH_PARTIAL: 'Произошла ошибка, но вот частичные результаты распознавания',
+  ERROR_DETAILS: 'Детали ошибки',
 };
 
 async function cleanupTempFiles() {
@@ -166,9 +170,17 @@ async function processAudioChunk(chunk, previousChunkText) {
   return transcription.text.trim();
 }
 
-async function updateTranscriptionProgress(steps, ctx, statusMsg, currentChunk, totalChunks, chunkProcessingTimes) {
+async function updateTranscriptionProgress(
+  steps,
+  ctx,
+  statusMsg,
+  currentChunk,
+  totalChunks,
+  chunkProcessingTimes,
+  hasError = false
+) {
   let etaText = '';
-  if (chunkProcessingTimes.length > 0) {
+  if (!hasError && chunkProcessingTimes.length > 0) {
     const avgProcessingTime = chunkProcessingTimes.reduce((a, b) => a + b, 0) / chunkProcessingTimes.length;
     const remainingChunks = totalChunks - currentChunk;
     const estimatedRemainingTime = (avgProcessingTime * remainingChunks) / 1000;
@@ -176,28 +188,67 @@ async function updateTranscriptionProgress(steps, ctx, statusMsg, currentChunk, 
   }
 
   const progressPercent = Math.round(((currentChunk + 1) / totalChunks) * 100);
-  steps[2].text = `Распознавание текста (${progressPercent}%)`;
-  if (progressPercent < 100) {
+  steps[2].text = `${RU_MESSAGES.TRANSCRIBING} (${progressPercent}%)`;
+  if (!hasError && progressPercent < 100) {
     steps[2].text += etaText;
   }
+  if (hasError) {
+    steps[2].status = EMOJI.ERROR;
+  }
   statusMsg = await updateStatusMessage(ctx, statusMsg, steps);
+}
+
+async function saveIntermediateResults(tempDir, file, transcription) {
+  const baseFilename = getOriginalFilename(file);
+  const transcriptionFilePath = path.join(tempDir, `${baseFilename}_partial.txt`);
+  await fsPromises.writeFile(transcriptionFilePath, transcription, 'utf8');
+  return transcriptionFilePath;
 }
 
 async function transcribeAudioChunks(chunks, steps, ctx, statusMsg) {
   let fullTranscription = '';
   const chunkProcessingTimes = [];
   let previousChunkText = '';
+  let lastSavedPath = null;
 
   let i = 0;
   for (const chunk of chunks) {
-    const chunkStartTime = Date.now();
-    await updateTranscriptionProgress(steps, ctx, statusMsg, i, chunks.length, chunkProcessingTimes);
-    const chunkText = await processAudioChunk(chunk, previousChunkText);
-    const chunkProcessingTime = Date.now() - chunkStartTime;
-    chunkProcessingTimes.push(chunkProcessingTime);
-    fullTranscription += (i > 0 ? '\n' : '') + chunkText;
-    previousChunkText = chunkText;
-    i++;
+    try {
+      const chunkStartTime = Date.now();
+      await updateTranscriptionProgress(steps, ctx, statusMsg, i, chunks.length, chunkProcessingTimes);
+      const chunkText = await processAudioChunk(chunk, previousChunkText);
+      const chunkProcessingTime = Date.now() - chunkStartTime;
+      chunkProcessingTimes.push(chunkProcessingTime);
+      fullTranscription += (i > 0 ? '\n' : '') + chunkText;
+      previousChunkText = chunkText;
+
+      if (i % 3 === 0 || i === chunks.length - 1) {
+        lastSavedPath = await saveIntermediateResults(
+          path.dirname(chunk.path),
+          ctx.message.voice || ctx.message.audio || ctx.message.video || ctx.message.document,
+          fullTranscription
+        );
+      }
+
+      i++;
+    } catch (error) {
+      const progressPercent = Math.round(((i + 1) / chunks.length) * 100);
+
+      await updateTranscriptionProgress(steps, ctx, statusMsg, i, chunks.length, chunkProcessingTimes, true);
+
+      steps.push({
+        text: `${EMOJI.WARNING} ${RU_MESSAGES.ERROR_WITH_PARTIAL} (${progressPercent}%): ${EMOJI.ARROW_DOWN}`,
+        status: '',
+      });
+      await updateStatusMessage(ctx, statusMsg, steps);
+
+      if (lastSavedPath) {
+        await ctx.replyWithDocument({
+          source: lastSavedPath,
+        });
+      }
+      throw error;
+    }
   }
 
   return fullTranscription;
@@ -224,7 +275,9 @@ async function handleErrorAndCleanup(error, ctx, statusMsg, file) {
   };
   await logger.error(`Additional context: ${JSON.stringify(errorContext)}`);
 
-  const errorMessage = `${EMOJI.ERROR} ${RU_MESSAGES.ERROR}`;
+  const errorMessage = `${EMOJI.ERROR} ${RU_MESSAGES.ERROR}\n${
+    error.message ? `${RU_MESSAGES.ERROR_DETAILS}: ${error.message}` : ''
+  }`;
   if (statusMsg) {
     await ctx.telegram
       .editMessageText(statusMsg.chat.id, statusMsg.message_id, null, errorMessage)
