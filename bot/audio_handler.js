@@ -22,7 +22,7 @@ const EMOJI = {
 };
 
 const RU_MESSAGES = {
-  CONVERTING: 'Конвертация аудио',
+  CONVERTING: 'Конвертация медиафайла',
   SPLITTING: 'Разделение аудио на части',
   TRANSCRIBING: 'Распознавание текста',
   REMAINING: 'Осталось приблизительно:',
@@ -49,6 +49,7 @@ function convertToWav(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg(inputPath)
       .toFormat('wav')
+      .outputOptions('-vn')
       .on('end', () => resolve())
       .on('error', (err) => reject(err))
       .save(outputPath);
@@ -81,19 +82,19 @@ function formatTime(seconds) {
 function getOriginalFilename(file) {
   // Trying to get filename from different message types:
   if (file.file_name) {
-    // For documents and audio files:
+    // For documents, audio and video files:
     return file.file_name.replace(/\.[^/.]+$/, ''); // Removing extension
   } else if (file.title) {
     // For audio messages with title:
     return file.title;
   } else {
-    // For voice messages or when no name is available:
+    // For voice messages, video notes or when no name is available:
     const timestamp = new Date()
       .toISOString()
       .replace(/[-:]/g, '') // Removing hyphens and colons
       .replace(/\..+/, '') // Removing milliseconds
       .replace('T', '_'); // Replacing 'T' with underscore
-    return `voice_${timestamp}`;
+    return `media_${timestamp}`;
   }
 }
 
@@ -251,7 +252,7 @@ export async function handleAudioMessage(ctx) {
 
     await ctx.sendChatAction('typing');
 
-    const file = ctx.message.voice || ctx.message.audio || ctx.message.document;
+    const file = ctx.message.voice || ctx.message.audio || ctx.message.video || ctx.message.document;
     if (!file) {
       throw new Error('No audio file found in message');
     }

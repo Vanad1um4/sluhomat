@@ -30,10 +30,23 @@ bot.command('start', handleStart);
 
 bot.on(message('voice'), handleAudioMessage);
 bot.on(message('audio'), handleAudioMessage);
+bot.on(message('video'), handleAudioMessage);
+bot.on(message('video_note'), handleAudioMessage);
 
 bot.on(message('document'), async (ctx) => {
   const mime = ctx.message.document.mime_type;
-  if (mime && mime.startsWith('audio/')) {
+  const supportedVideoTypes = [
+    'video/mp4',
+    'video/quicktime', // MOV
+    'video/x-msvideo', // AVI
+    'video/x-matroska', // MKV
+    'video/webm',
+    'video/x-flv',
+    'video/x-ms-wmv',
+    'video/3gpp',
+  ];
+
+  if (mime && (mime.startsWith('audio/') || mime.startsWith('video/') || supportedVideoTypes.includes(mime))) {
     await handleAudioMessage(ctx);
   }
 });
