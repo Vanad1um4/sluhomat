@@ -31,22 +31,17 @@ const RU_MESSAGES = {
   ERROR: 'Произошла ошибка при обработке аудио.',
 };
 
-async function cleanupOldTempFiles() {
+async function cleanupTempFiles() {
   try {
     const tempDir = TEMP_FILES_DIR;
     const files = await fsPromises.readdir(tempDir);
-    const now = Date.now();
 
     for (const file of files) {
       const filePath = path.join(tempDir, file);
-      const stats = await fsPromises.stat(filePath);
-
-      if (now - stats.mtimeMs > 3600000) {
-        await fsPromises.rm(filePath, { recursive: true, force: true });
-      }
+      await fsPromises.rm(filePath, { recursive: true, force: true });
     }
   } catch (error) {
-    await logger.error('Error cleaning old temp files:', error);
+    await logger.error('Error cleaning temp files:', error);
   }
 }
 
@@ -241,7 +236,7 @@ async function handleErrorAndCleanup(error, ctx, statusMsg, file) {
 }
 
 export async function handleAudioMessage(ctx) {
-  await cleanupOldTempFiles();
+  await cleanupTempFiles();
 
   let tempDir = null;
   let statusMsg = null;
