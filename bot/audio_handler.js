@@ -301,6 +301,7 @@ export async function handleAudioMessage(ctx) {
 
   let tempDir = null;
   let statusMsg = null;
+  let file = null;
   const startTime = Date.now();
 
   try {
@@ -312,7 +313,7 @@ export async function handleAudioMessage(ctx) {
 
     await ctx.sendChatAction('typing');
 
-    const file = ctx.message.voice || ctx.message.audio || ctx.message.video || ctx.message.document;
+    file = ctx.message.voice || ctx.message.audio || ctx.message.video || ctx.message.document;
     if (!file) {
       throw new Error('No audio file found in message');
     }
